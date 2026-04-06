@@ -47,6 +47,7 @@ DB_IM="im_db"
 SQL_MEDICAL="$BACKEND_DIR/medical_db.sql"
 SQL_IM="$BACKEND_DIR/im_db.sql"
 
+# URLs de téléchargement (GitHub Releases)
 BACKEND_URL="https://github.com/WiemHamila/medical-ressources/releases/download/v1.0.0/pfe-backend.tar.gz"
 FRONTEND_URL="https://github.com/WiemHamila/medical-ressources/releases/download/v1.0.0/pfe-frontend.tar.gz"
 
@@ -84,44 +85,35 @@ else
     success "Node.js $(node --version) déjà OK"
 fi
 
-# ✅ Correction npm
-if ! command -v npm >/dev/null 2>&1; then
-    warn "npm non trouvé — installation..."
-    apt install -y -qq npm || true
-fi
-
-if command -v npm >/dev/null 2>&1; then
-    success "npm $(npm --version) disponible"
-else
-    error "npm n'est toujours pas installé"
-fi
-
 # ─── Étape 3 : Télécharger le projet ─────────────────────────
 log "Étape 3/8 — Téléchargement du projet depuis GitHub Releases..."
 
 mkdir -p "$PROJECT_ROOT"
 cd "$PROJECT_ROOT"
 
+# Télécharger le backend
 log "Téléchargement du backend..."
 wget -q --show-progress -O pfe-backend.tar.gz "$BACKEND_URL"
 tar -xzf pfe-backend.tar.gz
 rm -f pfe-backend.tar.gz
 success "Backend téléchargé et extrait"
 
+# Télécharger le frontend
 log "Téléchargement du frontend..."
 wget -q --show-progress -O pfe-frontend.tar.gz "$FRONTEND_URL"
 tar -xzf pfe-frontend.tar.gz
 rm -f pfe-frontend.tar.gz
 success "Frontend téléchargé et extrait"
 
-[ -d "$BACKEND_DIR" ]  || error "Dossier backend introuvable : $BACKEND_DIR"
-[ -d "$FRONTEND_DIR" ] || error "Dossier frontend introuvable : $FRONTEND_DIR"
-[ -f "$BACKEND_DIR/manage.py" ] || error "manage.py introuvable"
+# Vérifier la structure
+[ -d "$BACKEND_DIR" ]  || error "Dossier backend introuvable après extraction : $BACKEND_DIR"
+[ -d "$FRONTEND_DIR" ] || error "Dossier frontend introuvable après extraction : $FRONTEND_DIR"
+[ -f "$BACKEND_DIR/manage.py" ] || error "manage.py introuvable dans $BACKEND_DIR"
 
 success "Structure du projet vérifiée"
 
-# ─── Étape 4 : CRLF → LF ─────────────────────────────────────
-log "Étape 4/8 — Correction des fins de ligne..."
+# ─── Étape 4 : Corriger les fins de ligne ────────────────────
+log "Étape 4/8 — Correction des fins de ligne (CRLF → LF)..."
 
 find "$BACKEND_DIR" \( -name "*.py" -o -name "*.js" -o -name "*.jsx" \) \
     | grep -v node_modules | grep -v __pycache__ \
@@ -129,63 +121,117 @@ find "$BACKEND_DIR" \( -name "*.py" -o -name "*.js" -o -name "*.jsx" \) \
 
 success "Fins de ligne corrigées"
 
-# ─── Étape 5 : Python venv ───────────────────────────────────
-log "Étape 5/8 — Environnement Python..."
+# ─── Étape 5 : Environnement Python virtuel ──────────────────
+log "Étape 5/8 — Création de l'environnement Python virtuel..."
 
 python3 -m venv "$VENV_DIR"
 source "$VENV_DIR/bin/activate"
 pip install --quiet --upgrade pip
 pip install --quiet -r "$BACKEND_DIR/requirements.txt"
 
-success "Python prêt"
+success "Dépendances Python installées"
 
-# ─── Étape 6 : MySQL ─────────────────────────────────────────
-log "Étape 6/8 — MySQL..."
+# ─── Étape 6 : MySQL — Démarrage + configuration ─────────────
+log "Étape 6/8 — Configuration de MySQL..."
 
+# S'assurer que le dossier socket existe
 mkdir -p /var/run/mysqld
 chown mysql:mysql /var/run/mysqld
 chmod 755 /var/run/mysqld
 
+# Démarrer MySQL
 service mysql start || systemctl start mysql
 wait_for_mysql
 
+# Créer les bases et l'utilisateur
+log "Création des bases de données et de l'utilisateur..."
+
 mysql -u root <<EOF
-CREATE DATABASE IF NOT EXISTS ${DB_MEDICAL};
-CREATE DATABASE IF NOT EXISTS ${DB_IM};
+CREATE DATABASE IF NOT EXISTS ${DB_MEDICAL} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE IF NOT EXISTS ${DB_IM} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASSWORD}';
 GRANT ALL PRIVILEGES ON ${DB_MEDICAL}.* TO '${DB_USER}'@'localhost';
 GRANT ALL PRIVILEGES ON ${DB_IM}.* TO '${DB_USER}'@'localhost';
 FLUSH PRIVILEGES;
 EOF
 
-success "DB OK"
+success "Bases de données et utilisateur créés"
 
-# ─── Étape 7 : Import SQL ────────────────────────────────────
-log "Étape 7/8 — Import SQL..."
+# ─── Étape 7 : Import des bases de données ───────────────────
+log "Étape 7/8 — Import des bases de données SQL..."
 
-[ -f "$SQL_MEDICAL" ] && mysql -u root "$DB_MEDICAL" < "$SQL_MEDICAL" && success "medical_db OK" || warn "medical_db ignorée"
-[ -f "$SQL_IM" ] && mysql -u root "$DB_IM" < "$SQL_IM" && success "im_db OK" || warn "im_db ignorée"
+if [ -f "$SQL_MEDICAL" ] && [ -s "$SQL_MEDICAL" ]; then
+    mysql -u root "$DB_MEDICAL" < "$SQL_MEDICAL"
+    success "medical_db importée"
+else
+    warn "Fichier $SQL_MEDICAL introuvable ou vide — import ignoré"
+fi
 
-# ─── Étape 8 : Django + React ────────────────────────────────
-log "Étape 8/8 — Setup final..."
+if [ -f "$SQL_IM" ] && [ -s "$SQL_IM" ]; then
+    mysql -u root "$DB_IM" < "$SQL_IM"
+    success "im_db importée"
+else
+    warn "Fichier $SQL_IM introuvable ou vide — import ignoré"
+fi
 
+# ─── Étape 8 : Migrations Django + Frontend ──────────────────
+log "Étape 8/8 — Migrations Django et préparation du frontend..."
+
+# Migrations Django
 cd "$BACKEND_DIR"
 source "$VENV_DIR/bin/activate"
 
-python manage.py migrate --run-syncdb 2>/dev/null || python manage.py migrate
-success "Django OK"
+# Mettre à jour ALLOWED_HOSTS de manière sûre avec Python
+SETTINGS_FILE=$(find "$BACKEND_DIR" -name "settings.py" -path "*/settings.py" | head -1)
+if [ -n "$SETTINGS_FILE" ]; then
+    log "Fichier settings.py trouvé : $SETTINGS_FILE"
+    export SETTINGS_FILE
+    python3 -c "
+import re, os
+sf = os.environ['SETTINGS_FILE']
+with open(sf, 'r') as f:
+    content = f.read()
+if \"'*'\" in content and 'ALLOWED_HOSTS' in content:
+    print('ALLOWED_HOSTS contient deja *')
+else:
+    content = re.sub(r'ALLOWED_HOSTS\s*=\s*\[.*?\]', \"ALLOWED_HOSTS = ['*']\", content, flags=re.DOTALL)
+    with open(sf, 'w') as f:
+        f.write(content)
+    print('ALLOWED_HOSTS mis a jour')
+"
+    success "ALLOWED_HOSTS vérifié/mis à jour"
+else
+    warn "settings.py introuvable — ALLOWED_HOSTS non modifié"
+fi
 
+python manage.py migrate --run-syncdb 2>/dev/null || python manage.py migrate
+success "Migrations Django appliquées"
+
+# Installer les dépendances frontend
 cd "$FRONTEND_DIR"
 
+# Supprimer node_modules Windows si présent
 if [ -d "node_modules" ]; then
-    rm -rf node_modules package-lock.json
+    if find node_modules -name "*.node" | xargs file 2>/dev/null | grep -q "PE32" 2>/dev/null; then
+        warn "node_modules Windows détecté — réinstallation..."
+        rm -rf node_modules package-lock.json
+    fi
 fi
 
 npm install --silent
-success "Frontend OK"
+success "Dépendances frontend installées"
 
+# ─── Fixer les permissions ────────────────────────────────────
 chown -R ubuntu:ubuntu "$PROJECT_ROOT"
 
+# ─── Résumé final ────────────────────────────────────────────
 echo ""
-echo -e "${GREEN}✅ Installation terminée !${NC}"
+echo -e "${GREEN}=================================================${NC}"
+echo -e "${GREEN}   ✅ Installation terminée avec succès !         ${NC}"
+echo -e "${GREEN}=================================================${NC}"
+echo ""
+echo -e "  Le projet est prêt à être lancé."
+echo -e "  Backend  : $BACKEND_DIR"
+echo -e "  Frontend : $FRONTEND_DIR"
+echo -e "  Venv     : $VENV_DIR"
 echo ""

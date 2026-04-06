@@ -1,0 +1,197 @@
+# =============================================================
+#  Pipeline CI/CD — Projet Medical (Django + React)
+#  Job 1 : Terraform → Créer la VM EC2 Ubuntu 24.04
+#  Job 2 : Setup    → Installer prérequis + déployer le projet
+#  Job 3 : Run      → Lancer le backend/frontend + afficher URLs
+# =============================================================
+
+name: "Deploy Medical Project"
+
+on:
+  push:
+    branches: [main]
+
+env:
+  AWS_REGION: us-east-1
+  TF_VERSION: "1.7.5"
+
+jobs:
+  # ═══════════════════════════════════════════════════════════
+  #  JOB 1 — Terraform : Créer l'infrastructure AWS
+  # ═══════════════════════════════════════════════════════════
+  terraform:
+    name: "Job 1 — Provision EC2"
+    runs-on: ubuntu-latest
+
+    outputs:
+      server_ip: ${{ steps.tf_output.outputs.server_ip }}
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Configurer AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Installer Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        working-directory: ./terraform
+        run: terraform init
+
+      - name: Terraform Plan
+        working-directory: ./terraform
+        run: terraform plan -out=tfplan
+
+      - name: Terraform Apply
+        working-directory: ./terraform
+        run: terraform apply -auto-approve tfplan
+
+      - name: Récupérer l'IP publique
+        id: tf_output
+        working-directory: ./terraform
+        run: |
+          SERVER_IP=$(terraform output -raw elastic_ip)
+          echo "server_ip=$SERVER_IP" >> "$GITHUB_OUTPUT"
+          echo "╔══════════════════════════════════════╗"
+          echo "║  IP publique : $SERVER_IP            ║"
+          echo "╚══════════════════════════════════════╝"
+
+      - name: Sauvegarder Terraform State
+        if: always()
+        working-directory: ./terraform
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add terraform.tfstate terraform.tfstate.backup 2>/dev/null || true
+          git stash -- terraform.tfstate terraform.tfstate.backup 2>/dev/null || true
+          git pull --rebase origin main || true
+          git stash pop 2>/dev/null || true
+          git add terraform.tfstate terraform.tfstate.backup 2>/dev/null || true
+          git diff --cached --quiet || git commit -m "chore: update terraform state [skip ci]"
+          git push || echo "⚠️ Push du state échoué — à vérifier"
+
+  # ═══════════════════════════════════════════════════════════
+  #  JOB 2 — Setup : Installer les prérequis + déployer
+  # ═══════════════════════════════════════════════════════════
+  setup:
+    name: "Job 2 — Setup & Deploy"
+    runs-on: ubuntu-latest
+    needs: terraform
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Attendre que la VM soit prête (SSH)
+        env:
+          SERVER_IP: ${{ needs.terraform.outputs.server_ip }}
+        run: |
+          echo "⏳ Attente SSH sur $SERVER_IP ..."
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/vockey.pem
+          chmod 600 ~/.ssh/vockey.pem
+
+          for i in $(seq 1 40); do
+            if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+                   -i ~/.ssh/vockey.pem ubuntu@$SERVER_IP "echo ok" 2>/dev/null; then
+              echo "✅ SSH prêt après $((i*10)) secondes"
+              break
+            fi
+            echo "  Tentative $i/40 — attente 10s..."
+            sleep 10
+          done
+
+      - name: Copier le script setup sur la VM
+        env:
+          SERVER_IP: ${{ needs.terraform.outputs.server_ip }}
+        run: |
+          scp -o StrictHostKeyChecking=no -i ~/.ssh/vockey.pem \
+            scripts/setup.sh ubuntu@$SERVER_IP:/home/ubuntu/setup.sh
+
+      - name: Exécuter le setup sur la VM
+        env:
+          SERVER_IP: ${{ needs.terraform.outputs.server_ip }}
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/vockey.pem \
+            ubuntu@$SERVER_IP "chmod +x /home/ubuntu/setup.sh && sudo bash /home/ubuntu/setup.sh"
+
+  # ═══════════════════════════════════════════════════════════
+  #  JOB 3 — Run : Lancer le projet + afficher les URLs
+  # ═══════════════════════════════════════════════════════════
+  run:
+    name: "Job 3 — Start & Show URLs"
+    runs-on: ubuntu-latest
+    needs: [terraform, setup]
+
+    steps:
+      - name: Configurer SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/vockey.pem
+          chmod 600 ~/.ssh/vockey.pem
+
+      - name: Démarrer le backend et le frontend
+        env:
+          SERVER_IP: ${{ needs.terraform.outputs.server_ip }}
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/vockey.pem ubuntu@$SERVER_IP << 'REMOTE_SCRIPT'
+            set -e
+
+            echo "══════════════════════════════════════"
+            echo "  Démarrage des services..."
+            echo "══════════════════════════════════════"
+
+            # Démarrer MySQL
+            sudo service mysql start
+            sleep 2
+
+            # Démarrer le Backend Django (en arrière-plan)
+            cd /home/ubuntu/medical-projet/pfe-backend
+            source /home/ubuntu/medical-projet/venv/bin/activate
+            nohup python manage.py runserver 0.0.0.0:8000 > /tmp/backend.log 2>&1 &
+            BACKEND_PID=$!
+            echo "✅ Backend démarré (PID: $BACKEND_PID)"
+
+            # Démarrer le Frontend React (en arrière-plan)
+            cd /home/ubuntu/medical-projet/pfe-frontend
+            nohup npx vite --host 0.0.0.0 --port 5173 > /tmp/frontend.log 2>&1 &
+            FRONTEND_PID=$!
+            echo "✅ Frontend démarré (PID: $FRONTEND_PID)"
+
+            # Attendre que les services soient prêts
+            sleep 10
+
+            # Vérifier les services
+            echo ""
+            echo "── Vérification des services ──"
+            curl -s -o /dev/null -w "Backend  (port 8000) : HTTP %{http_code}\n" http://localhost:8000/ || echo "Backend  : en attente..."
+            curl -s -o /dev/null -w "Frontend (port 5173) : HTTP %{http_code}\n" http://localhost:5173/ || echo "Frontend : en attente..."
+          REMOTE_SCRIPT
+
+      - name: Afficher les URLs d'accès
+        env:
+          SERVER_IP: ${{ needs.terraform.outputs.server_ip }}
+        run: |
+          echo ""
+          echo "╔══════════════════════════════════════════════════════╗"
+          echo "║        🚀 PROJET MEDICAL — DÉPLOYÉ AVEC SUCCÈS     ║"
+          echo "╠══════════════════════════════════════════════════════╣"
+          echo "║                                                      ║"
+          echo "║  🌐 Frontend : http://$SERVER_IP:5173                ║"
+          echo "║  🔧 Backend  : http://$SERVER_IP:8000                ║"
+          echo "║  📡 API      : http://$SERVER_IP:8000/api/           ║"
+          echo "║                                                      ║"
+          echo "║  🔑 SSH      : ssh -i vockey.pem ubuntu@$SERVER_IP   ║"
+          echo "║                                                      ║"
+          echo "╚══════════════════════════════════════════════════════╝"
+          echo ""
