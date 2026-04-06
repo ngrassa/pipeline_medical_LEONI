@@ -184,34 +184,24 @@ source "$VENV_DIR/bin/activate"
 # Mettre à jour ALLOWED_HOSTS de manière sûre avec Python
 SETTINGS_FILE=$(find "$BACKEND_DIR" -name "settings.py" -path "*/settings.py" | head -1)
 if [ -n "$SETTINGS_FILE" ]; then
-    python3 << 'PYEOF'
-import re, sys
-
-settings_file = sys.argv[1] if len(sys.argv) > 1 else None
-if not settings_file:
-    # Lire depuis la variable d'environnement
-    import os
-    settings_file = os.environ.get("SETTINGS_FILE", "")
-
-with open(settings_file, "r") as f:
+    log "Fichier settings.py trouvé : $SETTINGS_FILE"
+    export SETTINGS_FILE
+    python3 -c "
+import re, os
+sf = os.environ['SETTINGS_FILE']
+with open(sf, 'r') as f:
     content = f.read()
-
-# Si ALLOWED_HOSTS contient déjà '*', ne rien faire
-if "'*'" in content and "ALLOWED_HOSTS" in content:
-    print("ALLOWED_HOSTS contient déjà '*'")
+if \"'*'\" in content and 'ALLOWED_HOSTS' in content:
+    print('ALLOWED_HOSTS contient deja *')
 else:
-    # Remplacer ALLOWED_HOSTS = [...] (même multiligne) par ['*']
-    content = re.sub(
-        r"ALLOWED_HOSTS\s*=\s*\[.*?\]",
-        "ALLOWED_HOSTS = ['*']",
-        content,
-        flags=re.DOTALL
-    )
-    with open(settings_file, "w") as f:
+    content = re.sub(r'ALLOWED_HOSTS\s*=\s*\[.*?\]', \"ALLOWED_HOSTS = ['*']\", content, flags=re.DOTALL)
+    with open(sf, 'w') as f:
         f.write(content)
-    print("ALLOWED_HOSTS mis à jour avec ['*']")
-PYEOF
+    print('ALLOWED_HOSTS mis a jour')
+"
     success "ALLOWED_HOSTS vérifié/mis à jour"
+else
+    warn "settings.py introuvable — ALLOWED_HOSTS non modifié"
 fi
 
 python manage.py migrate --run-syncdb 2>/dev/null || python manage.py migrate
