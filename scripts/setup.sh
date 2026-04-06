@@ -38,6 +38,7 @@ wait_for_mysql() {
 PROJECT_ROOT="/home/ubuntu/medical-projet"
 BACKEND_DIR="$PROJECT_ROOT/pfe-backend"
 FRONTEND_DIR="$PROJECT_ROOT/pfe-frontend"
+VENV_DIR="$BACKEND_DIR/.venv"
 DB_USER="django_user"
 DB_PASSWORD="123"
 DB_MEDICAL="medical_db"
@@ -78,12 +79,78 @@ else
   success "Node.js $(node --version) déjà OK"
 fi
 
-python3 -m venv "$BACKEND_DIR/.venv"
-source "$BACKEND_DIR/.venv/bin/activate"
-pip install --quiet --upgrade pip
-pip install --quiet -r "$BACKEND_DIR/requirements.txt"
-deactivate
-success "Python prêt"
+if ! command -v npm >/dev/null 2>&1; then
+  warn "npm non trouvé — installation..."
+  apt install -y -qq npm || true
+fi
+
+if command -v npm >/dev/null 2>&1; then
+  success "npm $(npm --version) disponible"
+else
+  error "npm n'est toujours pas installé"
+fi
+
+# ─── Étape 3 : Télécharger le projet ──────────────────────────
+log "Étape 3/8 — Téléchargement du projet depuis GitHub Releases..."
+mkdir -p "$PROJECT_ROOT"
+cd "$PROJECT_ROOT"
+
+log "Téléchargement du backend..."
+wget -q --show-progress -O pfe-backend.tar.gz "$BACKEND_URL"
+tar -xzf pfe-backend.tar.gz
+rm -f pfe-backend.tar.gz
+success "Backend téléchargé et extrait"
+
+log "Téléchargement du frontend..."
+wget -q --show-progress -O pfe-frontend.tar.gz "$FRONTEND_URL"
+tar -xzf pfe-frontend.tar.gz
+rm -f pfe-frontend.tar.gz
+success "Frontend téléchargé et extrait"
+
+[ -d "$BACKEND_DIR" ]           || error "Dossier backend introuvable : $BACKEND_DIR"
+[ -d "$FRONTEND_DIR" ]          || error "Dossier frontend introuvable : $FRONTEND_DIR"
+[ -f "$BACKEND_DIR/manage.py" ] || error "manage.py introuvable"
+success "Structure du projet vérifiée"
+
+# ─── Étape 4 : CRLF → LF ─────────────────────────────────────
+log "Étape 4/8 — Correction des fins de ligne..."
+find "$BACKEND_DIR" \( -name "*.py" -o -name "*.js" -o -name "*.jsx" \) \
+  | grep -v node_modules | grep -v __pycache__ \
+  | xargs dos2unix -q 2>/dev/null || true
+success "Fins de ligne corrigées"
+
+# ─── Étape 5 : Python venv ────────────────────────────────────
+log "Étape 5/8 — Environnement Python..."
+
+# Trouver le bon binaire python3
+PYTHON_BIN=$(which python3.12 2>/dev/null || which python3.11 2>/dev/null || which python3.10 2>/dev/null || which python3 2>/dev/null)
+[ -z "$PYTHON_BIN" ] && error "Aucun binaire python3 trouvé"
+log "Python utilisé : $PYTHON_BIN ($(${PYTHON_BIN} --version))"
+
+# Supprimer un venv cassé si présent
+[ -d "$VENV_DIR" ] && rm -rf "$VENV_DIR"
+
+# Créer le venv avec --copies pour éviter les symlinks cassés
+$PYTHON_BIN -m venv --copies "$VENV_DIR"
+
+# Vérifier que pip est bien présent dans le venv
+[ -f "$VENV_DIR/bin/pip" ]    || [ -f "$VENV_DIR/bin/pip3" ] || {
+  log "pip absent du venv — bootstrap via ensurepip..."
+  $PYTHON_BIN -m ensurepip --upgrade
+  $PYTHON_BIN -m venv --copies "$VENV_DIR"
+}
+
+# Utiliser python du venv directement pour éviter tout problème de PATH
+VENV_PYTHON="$VENV_DIR/bin/python"
+[ -f "$VENV_PYTHON" ] || error "Le venv n'a pas de binaire python : $VENV_PYTHON"
+
+log "Mise à jour de pip..."
+"$VENV_PYTHON" -m pip install --quiet --upgrade pip
+
+log "Installation des dépendances Python..."
+"$VENV_PYTHON" -m pip install --quiet -r "$BACKEND_DIR/requirements.txt"
+
+success "Python venv prêt : $VENV_DIR"
 
 # ─── Étape 6 : MySQL ──────────────────────────────────────────
 log "Étape 6/8 — MySQL..."
@@ -112,9 +179,7 @@ log "Étape 7/8 — Import SQL..."
 log "Étape 8/8 — Migrations Django + npm install..."
 
 cd "$BACKEND_DIR"
-source .venv/bin/activate
-python manage.py migrate --run-syncdb 2>/dev/null || python manage.py migrate
-deactivate
+"$VENV_PYTHON" manage.py migrate --run-syncdb 2>/dev/null || "$VENV_PYTHON" manage.py migrate
 success "Migrations Django OK"
 
 cd "$FRONTEND_DIR"
@@ -130,15 +195,15 @@ log "Lancement des serveurs dans tmux (session: $TMUX_SESSION)..."
 # Tuer une ancienne session si elle existe
 tmux kill-session -t "$TMUX_SESSION" 2>/dev/null || true
 
-# Créer la session tmux et lancer le backend dans le panneau 0
+# Créer la session tmux
 tmux new-session -d -s "$TMUX_SESSION" -x 220 -y 50
 
+# Panneau 0 — Backend Django
 tmux send-keys -t "$TMUX_SESSION:0" \
-  "cd '$BACKEND_DIR' && source .venv/bin/activate && pip install -q -r requirements.txt && python manage.py runserver 0.0.0.0:8000" Enter
+  "cd '$BACKEND_DIR' && '$VENV_PYTHON' -m pip install -q -r requirements.txt && '$VENV_PYTHON' manage.py runserver 0.0.0.0:8000" Enter
 
-# Créer un second panneau et lancer le frontend
+# Panneau 1 — Frontend React (split vertical)
 tmux split-window -h -t "$TMUX_SESSION:0"
-
 tmux send-keys -t "$TMUX_SESSION:0.1" \
   "cd '$FRONTEND_DIR' && npm run dev" Enter
 
@@ -149,8 +214,8 @@ echo -e "${BLUE}  Backend  →${NC} http://$(hostname -I | awk '{print $1}'):800
 echo -e "${BLUE}  Frontend →${NC} http://$(hostname -I | awk '{print $1}'):5173"
 echo ""
 echo -e "${YELLOW}  Commandes tmux utiles :${NC}"
-echo -e "  tmux attach -t $TMUX_SESSION   # voir les deux serveurs"
-echo -e "  Ctrl+B D                        # détacher (serveurs restent actifs)"
-echo -e "  Ctrl+B →/←                      # naviguer entre les panneaux"
-echo -e "  tmux kill-session -t $TMUX_SESSION  # tout arrêter"
+echo -e "  tmux attach -t $TMUX_SESSION        # voir les deux serveurs"
+echo -e "  Ctrl+B D                             # détacher (serveurs restent actifs)"
+echo -e "  Ctrl+B flèche droite/gauche          # naviguer entre les panneaux"
+echo -e "  tmux kill-session -t $TMUX_SESSION   # tout arrêter"
 echo ""
