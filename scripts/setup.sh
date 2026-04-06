@@ -205,7 +205,7 @@ tmux send-keys -t "$TMUX_SESSION:0" \
 # Panneau 1 — Frontend React (split vertical)
 tmux split-window -h -t "$TMUX_SESSION:0"
 tmux send-keys -t "$TMUX_SESSION:0.1" \
-  "cd '$FRONTEND_DIR' && npm run dev" Enter
+  "cd '$FRONTEND_DIR' && npm run dev -- --host 0.0.0.0" Enter
 
 echo ""
 echo -e "${GREEN}✅ Installation terminée !${NC}"
