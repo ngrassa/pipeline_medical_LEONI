@@ -1,0 +1,66 @@
+# =============================================================
+#  Destroy — Supprimer l'infrastructure AWS
+#  Déclenché manuellement depuis GitHub Actions
+# =============================================================
+
+name: "Destroy Infrastructure"
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: "Tapez 'destroy' pour confirmer la suppression"
+        required: true
+        type: string
+
+env:
+  AWS_REGION: us-east-1
+  TF_VERSION: "1.7.5"
+
+jobs:
+  destroy:
+    name: "Terraform Destroy"
+    runs-on: ubuntu-latest
+    if: github.event.inputs.confirm == 'destroy'
+
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Configurer AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Installer Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        working-directory: ./terraform
+        run: terraform init
+
+      - name: Terraform Destroy
+        working-directory: ./terraform
+        run: terraform destroy -auto-approve
+
+      - name: Nettoyer le state
+        working-directory: ./terraform
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          rm -f terraform.tfstate terraform.tfstate.backup
+          git add -A
+          git diff --cached --quiet || git commit -m "chore: clean terraform state after destroy [skip ci]"
+          git push || echo "⚠️ Push échoué"
+
+      - name: Résultat
+        run: |
+          echo "╔══════════════════════════════════════╗"
+          echo "║  🗑️  Infrastructure supprimée         ║"
+          echo "╚══════════════════════════════════════╝"
