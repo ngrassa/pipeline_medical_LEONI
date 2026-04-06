@@ -1,10 +1,4 @@
 #!/bin/bash
-# =============================================================
-#  setup.sh — Installation complète sur EC2 Ubuntu 24.04 LTS
-#  Télécharge le projet depuis GitHub Releases
-#  Installe tous les prérequis, importe les bases, prépare le run
-# =============================================================
-
 set -e
 
 # ─── Couleurs ────────────────────────────────────────────────
@@ -19,134 +13,78 @@ success() { echo -e "${GREEN}[OK]${NC} $1"; }
 warn()    { echo -e "${YELLOW}[WARN]${NC} $1"; }
 error()   { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 
-# ─── Fonction : attendre que MySQL soit prêt ─────────────────
 wait_for_mysql() {
     local max_attempts=30
     local attempt=0
-    log "Attente que MySQL soit prêt..."
+    log "Attente MySQL..."
     while [ $attempt -lt $max_attempts ]; do
         if mysqladmin ping --silent 2>/dev/null; then
-            success "MySQL est prêt"
+            success "MySQL prêt"
             return 0
         fi
         attempt=$((attempt + 1))
         sleep 1
     done
-    error "MySQL n'a pas démarré après ${max_attempts} secondes"
+    error "MySQL KO"
 }
 
-# ─── Variables ───────────────────────────────────────────────
 PROJECT_ROOT="/home/ubuntu/medical-projet"
 BACKEND_DIR="$PROJECT_ROOT/pfe-backend"
 FRONTEND_DIR="$PROJECT_ROOT/pfe-frontend"
 VENV_DIR="$PROJECT_ROOT/venv"
+
 DB_USER="django_user"
 DB_PASSWORD="123"
 DB_MEDICAL="medical_db"
 DB_IM="im_db"
+
 SQL_MEDICAL="$BACKEND_DIR/medical_db.sql"
 SQL_IM="$BACKEND_DIR/im_db.sql"
 
 BACKEND_URL="https://github.com/WiemHamila/medical-ressources/releases/download/v1.0.0/pfe-backend.tar.gz"
 FRONTEND_URL="https://github.com/WiemHamila/medical-ressources/releases/download/v1.0.0/pfe-frontend.tar.gz"
 
-echo ""
-echo -e "${BLUE}=================================================${NC}"
-echo -e "${BLUE}   Setup EC2 — Projet Medical Django + React     ${NC}"
-echo -e "${BLUE}=================================================${NC}"
-echo ""
+echo "===== SETUP PROD ====="
 
-# ─── Étape 1 : Mise à jour système + outils ──────────────────
-log "Étape 1/8 — Mise à jour système et installation des outils..."
-
-export DEBIAN_FRONTEND=noninteractive
-
+# ─── 1. SYSTEM ───────────────────────────────────────────────
+log "Install packages..."
 apt update -qq
-apt upgrade -y -qq
 apt install -y -qq \
-    python3 python3-pip python3-venv python3-full python3-dev \
-    libmysqlclient-dev build-essential pkg-config \
-    mysql-server \
-    curl wget unzip dos2unix
+ python3 python3-pip python3-venv python3-dev \
+ build-essential pkg-config \
+ mysql-server nginx curl wget unzip dos2unix
 
-success "Outils système installés"
+# ─── 2. NODE 20 ──────────────────────────────────────────────
+log "Node.js 20..."
+curl -fsSL https://deb.nodesource.com/setup_20.x | bash - >/dev/null
+apt remove -y nodejs npm >/dev/null 2>&1 || true
+apt install -y nodejs
+hash -r
 
-# ─── Étape 2 : Node.js v20 ───────────────────────────────────
-log "Étape 2/8 — Installation de Node.js v20..."
-
-NODE_VERSION=$(node --version 2>/dev/null | cut -d'v' -f2 | cut -d'.' -f1 || echo "0")
-
-if [ "$NODE_VERSION" -lt 20 ] 2>/dev/null; then
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - > /dev/null 2>&1
-    apt install -y -qq nodejs
-    success "Node.js $(node --version) installé"
-else
-    success "Node.js $(node --version) déjà OK"
-fi
-
-# ✅ Correction npm
-if ! command -v npm >/dev/null 2>&1; then
-    warn "npm non trouvé — installation..."
-    apt install -y -qq npm || true
-fi
-
-if command -v npm >/dev/null 2>&1; then
-    success "npm $(npm --version) disponible"
-else
-    error "npm n'est toujours pas installé"
-fi
-
-# ─── Étape 3 : Télécharger le projet ─────────────────────────
-log "Étape 3/8 — Téléchargement du projet depuis GitHub Releases..."
-
+# ─── 3. DOWNLOAD ─────────────────────────────────────────────
 mkdir -p "$PROJECT_ROOT"
 cd "$PROJECT_ROOT"
 
-log "Téléchargement du backend..."
-wget -q --show-progress -O pfe-backend.tar.gz "$BACKEND_URL"
-tar -xzf pfe-backend.tar.gz
-rm -f pfe-backend.tar.gz
-success "Backend téléchargé et extrait"
+wget -q -O backend.tar.gz "$BACKEND_URL"
+tar -xzf backend.tar.gz && rm backend.tar.gz
 
-log "Téléchargement du frontend..."
-wget -q --show-progress -O pfe-frontend.tar.gz "$FRONTEND_URL"
-tar -xzf pfe-frontend.tar.gz
-rm -f pfe-frontend.tar.gz
-success "Frontend téléchargé et extrait"
+wget -q -O frontend.tar.gz "$FRONTEND_URL"
+tar -xzf frontend.tar.gz && rm frontend.tar.gz
 
-[ -d "$BACKEND_DIR" ]  || error "Dossier backend introuvable : $BACKEND_DIR"
-[ -d "$FRONTEND_DIR" ] || error "Dossier frontend introuvable : $FRONTEND_DIR"
-[ -f "$BACKEND_DIR/manage.py" ] || error "manage.py introuvable"
+# ─── 4. FIX FILES ────────────────────────────────────────────
+find "$PROJECT_ROOT" -type f | xargs dos2unix -q || true
 
-success "Structure du projet vérifiée"
-
-# ─── Étape 4 : CRLF → LF ─────────────────────────────────────
-log "Étape 4/8 — Correction des fins de ligne..."
-
-find "$BACKEND_DIR" \( -name "*.py" -o -name "*.js" -o -name "*.jsx" \) \
-    | grep -v node_modules | grep -v __pycache__ \
-    | xargs dos2unix -q 2>/dev/null || true
-
-success "Fins de ligne corrigées"
-
-# ─── Étape 5 : Python venv ───────────────────────────────────
-log "Étape 5/8 — Environnement Python..."
-
+# ─── 5. PYTHON ───────────────────────────────────────────────
 python3 -m venv "$VENV_DIR"
 source "$VENV_DIR/bin/activate"
-pip install --quiet --upgrade pip
-pip install --quiet -r "$BACKEND_DIR/requirements.txt"
+ln -sf $(which python3) "$VENV_DIR/bin/python"
 
-success "Python prêt"
+pip install --upgrade pip
+pip install -r "$BACKEND_DIR/requirements.txt"
+pip install gunicorn
 
-# ─── Étape 6 : MySQL ─────────────────────────────────────────
-log "Étape 6/8 — MySQL..."
-
-mkdir -p /var/run/mysqld
-chown mysql:mysql /var/run/mysqld
-chmod 755 /var/run/mysqld
-
-service mysql start || systemctl start mysql
+# ─── 6. MYSQL ────────────────────────────────────────────────
+service mysql start
 wait_for_mysql
 
 mysql -u root <<EOF
@@ -158,34 +96,70 @@ GRANT ALL PRIVILEGES ON ${DB_IM}.* TO '${DB_USER}'@'localhost';
 FLUSH PRIVILEGES;
 EOF
 
-success "DB OK"
+[ -f "$SQL_MEDICAL" ] && mysql -u root "$DB_MEDICAL" < "$SQL_MEDICAL" || true
+[ -f "$SQL_IM" ] && mysql -u root "$DB_IM" < "$SQL_IM" || true
 
-# ─── Étape 7 : Import SQL ────────────────────────────────────
-log "Étape 7/8 — Import SQL..."
-
-[ -f "$SQL_MEDICAL" ] && mysql -u root "$DB_MEDICAL" < "$SQL_MEDICAL" && success "medical_db OK" || warn "medical_db ignorée"
-[ -f "$SQL_IM" ] && mysql -u root "$DB_IM" < "$SQL_IM" && success "im_db OK" || warn "im_db ignorée"
-
-# ─── Étape 8 : Django + React ────────────────────────────────
-log "Étape 8/8 — Setup final..."
-
+# ─── 7. DJANGO ───────────────────────────────────────────────
 cd "$BACKEND_DIR"
 source "$VENV_DIR/bin/activate"
 
-python manage.py migrate --run-syncdb 2>/dev/null || python manage.py migrate
-success "Django OK"
+python manage.py migrate
+python manage.py collectstatic --noinput
 
+# ─── 8. FRONTEND BUILD ───────────────────────────────────────
 cd "$FRONTEND_DIR"
+npm install
+npm run build
 
-if [ -d "node_modules" ]; then
-    rm -rf node_modules package-lock.json
-fi
+# ─── 9. GUNICORN SERVICE ─────────────────────────────────────
+cat > /etc/systemd/system/gunicorn.service <<EOF
+[Unit]
+Description=Gunicorn Django
+After=network.target
 
-npm install --silent
-success "Frontend OK"
+[Service]
+User=ubuntu
+Group=www-data
+WorkingDirectory=$BACKEND_DIR
+Environment="PATH=$VENV_DIR/bin"
+ExecStart=$VENV_DIR/bin/gunicorn medical_platform.wsgi:application --bind 127.0.0.1:8000
 
-chown -R ubuntu:ubuntu "$PROJECT_ROOT"
+[Install]
+WantedBy=multi-user.target
+EOF
 
+systemctl daemon-reexec
+systemctl daemon-reload
+systemctl enable gunicorn
+systemctl start gunicorn
+
+# ─── 10. NGINX ───────────────────────────────────────────────
+cat > /etc/nginx/sites-available/medical <<EOF
+server {
+    listen 80;
+
+    location / {
+        root $FRONTEND_DIR/dist;
+        index index.html;
+        try_files \$uri /index.html;
+    }
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:8000/;
+    }
+
+    location /static/ {
+        alias $BACKEND_DIR/staticfiles/;
+    }
+}
+EOF
+
+ln -sf /etc/nginx/sites-available/medical /etc/nginx/sites-enabled/
+rm -f /etc/nginx/sites-enabled/default
+
+systemctl restart nginx
+
+# ─── DONE ────────────────────────────────────────────────────
 echo ""
-echo -e "${GREEN}✅ Installation terminée !${NC}"
-echo ""
+echo "✅ PRODUCTION READY"
+echo "👉 http://IP_EC2"
