@@ -181,16 +181,37 @@ log "Étape 8/8 — Migrations Django et préparation du frontend..."
 cd "$BACKEND_DIR"
 source "$VENV_DIR/bin/activate"
 
-# Mettre à jour settings.py pour écouter sur 0.0.0.0 si ALLOWED_HOSTS est restreint
-if grep -q "ALLOWED_HOSTS" "$BACKEND_DIR"/*/settings.py 2>/dev/null; then
-    SETTINGS_FILE=$(find "$BACKEND_DIR" -name "settings.py" -path "*/settings.py" | head -1)
-    if [ -n "$SETTINGS_FILE" ]; then
-        # Ajouter '*' aux ALLOWED_HOSTS si pas déjà présent
-        if ! grep -q "'\\*'" "$SETTINGS_FILE"; then
-            sed -i "s/ALLOWED_HOSTS\s*=\s*\[/ALLOWED_HOSTS = ['*', /" "$SETTINGS_FILE"
-            success "ALLOWED_HOSTS mis à jour avec '*'"
-        fi
-    fi
+# Mettre à jour ALLOWED_HOSTS de manière sûre avec Python
+SETTINGS_FILE=$(find "$BACKEND_DIR" -name "settings.py" -path "*/settings.py" | head -1)
+if [ -n "$SETTINGS_FILE" ]; then
+    python3 << 'PYEOF'
+import re, sys
+
+settings_file = sys.argv[1] if len(sys.argv) > 1 else None
+if not settings_file:
+    # Lire depuis la variable d'environnement
+    import os
+    settings_file = os.environ.get("SETTINGS_FILE", "")
+
+with open(settings_file, "r") as f:
+    content = f.read()
+
+# Si ALLOWED_HOSTS contient déjà '*', ne rien faire
+if "'*'" in content and "ALLOWED_HOSTS" in content:
+    print("ALLOWED_HOSTS contient déjà '*'")
+else:
+    # Remplacer ALLOWED_HOSTS = [...] (même multiligne) par ['*']
+    content = re.sub(
+        r"ALLOWED_HOSTS\s*=\s*\[.*?\]",
+        "ALLOWED_HOSTS = ['*']",
+        content,
+        flags=re.DOTALL
+    )
+    with open(settings_file, "w") as f:
+        f.write(content)
+    print("ALLOWED_HOSTS mis à jour avec ['*']")
+PYEOF
+    success "ALLOWED_HOSTS vérifié/mis à jour"
 fi
 
 python manage.py migrate --run-syncdb 2>/dev/null || python manage.py migrate
