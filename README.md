@@ -71,9 +71,12 @@ Aller dans **Actions → Destroy Infrastructure → Run workflow** et taper `des
 ├── .gitignore
 └── README.md
 ```
+<<<<<<< HEAD
 ## lancer le back
 python manage.py runserver 0.0.0.0:8000
 
 ## lancer le front
 
 
+=======
+>>>>>>> 64e7dafc1f15977796f8690dc753f7305ad523c5
