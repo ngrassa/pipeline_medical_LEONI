@@ -206,7 +206,7 @@ jobs:
             set -e
             echo "Demarrage des services..."
             sudo pkill -f "manage.py runserver" 2>/dev/null || true
-            sudo pkill -f "node" 2>/dev/null || true
+            sudo pkill -f "vite" 2>/dev/null || true
             sleep 2
             sudo service mysql start
             sleep 2
@@ -215,31 +215,17 @@ jobs:
             cd /home/ubuntu/medical-projet/pfe-backend
             source .venv/bin/activate
             nohup python manage.py runserver 0.0.0.0:8000 > /tmp/backend.log 2>&1 &
-            disown
-            BACKEND_PID=$!
-            echo "Backend demarre (PID: $BACKEND_PID)"
+            echo "Backend demarre (PID: $!)"
 
             # Frontend
             cd /home/ubuntu/medical-projet/pfe-frontend
-            nohup npx --yes vite --host 0.0.0.0 --port 5173 > /tmp/frontend.log 2>&1 &
-            disown
-            FRONTEND_PID=$!
-            echo "Frontend demarre (PID: $FRONTEND_PID)"
+            nohup npm run dev -- --host 0.0.0.0 --port 5173 > /tmp/frontend.log 2>&1 &
+            echo "Frontend demarre (PID: $!)"
 
-            sleep 15
-
-            echo "-- Verification des processus --"
-            ps -p $BACKEND_PID > /dev/null 2>&1 && echo "Backend  : processus actif" || echo "Backend  : CRASH - processus mort"
-            ps -p $FRONTEND_PID > /dev/null 2>&1 && echo "Frontend : processus actif" || echo "Frontend : CRASH - processus mort"
-
-            echo "-- Verification des ports --"
+            sleep 10
+            echo "-- Verification des services --"
             curl -s -o /dev/null -w "Backend  (port 8000) : HTTP %{http_code}\n" http://localhost:8000/ || echo "Backend  : en attente..."
             curl -s -o /dev/null -w "Frontend (port 5173) : HTTP %{http_code}\n" http://localhost:5173/ || echo "Frontend : en attente..."
-
-            echo "-- Logs backend (dernieres lignes) --"
-            tail -20 /tmp/backend.log 2>/dev/null || echo "Pas de logs backend"
-            echo "-- Logs frontend (dernieres lignes) --"
-            tail -20 /tmp/frontend.log 2>/dev/null || echo "Pas de logs frontend"
           REMOTE_SCRIPT
 
       - name: Afficher les URLs
