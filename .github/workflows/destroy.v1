@@ -1,3 +1,8 @@
+# =============================================================
+#  Destroy — Supprimer l'infrastructure AWS
+#  Déclenché manuellement depuis GitHub Actions
+# =============================================================
+
 name: "Destroy Infrastructure"
 
 on:
@@ -6,7 +11,7 @@ on:
       confirm:
         description: "Tapez 'destroy' pour confirmer la suppression"
         required: true
-        default: ""
+        type: string
 
 env:
   AWS_REGION: us-east-1
@@ -16,19 +21,9 @@ jobs:
   destroy:
     name: "Terraform Destroy"
     runs-on: ubuntu-latest
+    if: github.event.inputs.confirm == 'destroy'
 
     steps:
-      - name: Verifier la confirmation
-        run: |
-          CONFIRM=$(echo "${{ github.event.inputs.confirm }}" | xargs)
-          if [ "$CONFIRM" != "destroy" ]; then
-            echo "Vous avez tape: '${{ github.event.inputs.confirm }}'"
-            echo "Attendu: 'destroy'"
-            echo "Annulation."
-            exit 1
-          fi
-          echo "Confirmation OK — lancement du destroy"
-
       - name: Checkout du code
         uses: actions/checkout@v4
 
@@ -94,8 +89,8 @@ jobs:
           git diff --cached --quiet || git commit -m "chore: clean terraform state after destroy [skip ci]"
           git push || echo "Push du state echoue"
 
-      - name: Resultat
+      - name: Résultat
         run: |
-          echo "============================================="
-          echo "  Infrastructure supprimee avec succes"
-          echo "============================================="
+          echo "╔══════════════════════════════════════╗"
+          echo "║  🗑️  Infrastructure supprimée         ║"
+          echo "╚══════════════════════════════════════╝"
