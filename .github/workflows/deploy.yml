@@ -210,6 +210,8 @@ jobs:
             sleep 2
             sudo service mysql start
             sleep 2
+            # Fix permissions (setup.sh ran as root)
+            sudo chown -R ubuntu:ubuntu /home/ubuntu/medical-projet
 
             # Backend
             cd /home/ubuntu/medical-projet/pfe-backend
