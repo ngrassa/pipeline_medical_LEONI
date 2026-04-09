@@ -1,0 +1,239 @@
+name: "Deploy Medical Project"
+
+on:
+  push:
+    branches: [main]
+
+env:
+  AWS_REGION: us-east-1
+  TF_VERSION: "1.7.5"
+
+jobs:
+  check:
+    name: "Job 1 — Check existing VM"
+    runs-on: ubuntu-latest
+    outputs:
+      vm_exists: ${{ steps.check_vm.outputs.vm_exists }}
+      server_ip: ${{ steps.check_vm.outputs.server_ip }}
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Verifier si la VM existe et repond
+        id: check_vm
+        run: |
+          SERVER_IP=""
+          if [ -f terraform/terraform.tfstate ]; then
+            SERVER_IP=$(python3 -c "import json; f=open('terraform/terraform.tfstate'); s=json.load(f); [print(i['attributes']['public_ip']) for r in s.get('resources',[]) if r.get('type')=='aws_eip' for i in r.get('instances',[]) if i.get('attributes',{}).get('public_ip')]" 2>/dev/null | head -1 || echo "")
+          fi
+          if [ -n "$SERVER_IP" ]; then
+            echo "IP trouvee dans tfstate : $SERVER_IP"
+            mkdir -p ~/.ssh
+            echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/vockey.pem
+            chmod 600 ~/.ssh/vockey.pem
+            if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o BatchMode=yes -i ~/.ssh/vockey.pem ubuntu@"$SERVER_IP" "echo ok" 2>/dev/null; then
+              echo "VM existante et accessible : $SERVER_IP"
+              echo "vm_exists=true" >> "$GITHUB_OUTPUT"
+              echo "server_ip=$SERVER_IP" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          echo "Aucune VM active trouvee"
+          echo "vm_exists=false" >> "$GITHUB_OUTPUT"
+          echo "server_ip=" >> "$GITHUB_OUTPUT"
+
+  terraform:
+    name: "Job 2 — Provision EC2"
+    runs-on: ubuntu-latest
+    needs: check
+    if: needs.check.outputs.vm_exists != 'true'
+    outputs:
+      server_ip: ${{ steps.tf_output.outputs.server_ip }}
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Configurer AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Installer Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        working-directory: ./terraform
+        run: terraform init
+
+      - name: Importer ressources AWS existantes
+        working-directory: ./terraform
+        run: |
+          echo "Recherche de ressources existantes sur AWS..."
+
+          SG_ID=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=server_terraform-sg" --query "SecurityGroups[0].GroupId" --output text 2>/dev/null || echo "None")
+          if [ "$SG_ID" != "None" ] && [ -n "$SG_ID" ]; then
+            echo "Security Group existant : $SG_ID — import..."
+            terraform import aws_security_group.server_terraform_sg "$SG_ID" 2>/dev/null || echo "Deja dans le state"
+          fi
+
+          INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=server_terraform" "Name=instance-state-name,Values=running,stopped" --query "Reservations[0].Instances[0].InstanceId" --output text 2>/dev/null || echo "None")
+          if [ "$INSTANCE_ID" != "None" ] && [ -n "$INSTANCE_ID" ]; then
+            echo "Instance EC2 existante : $INSTANCE_ID — import..."
+            terraform import aws_instance.server_terraform "$INSTANCE_ID" 2>/dev/null || echo "Deja dans le state"
+          fi
+
+          EIP_ALLOC=$(aws ec2 describe-addresses --filters "Name=tag:Name,Values=server_terraform-eip" --query "Addresses[0].AllocationId" --output text 2>/dev/null || echo "None")
+          if [ "$EIP_ALLOC" != "None" ] && [ -n "$EIP_ALLOC" ]; then
+            echo "Elastic IP existante : $EIP_ALLOC — import..."
+            terraform import aws_eip.server_terraform_eip "$EIP_ALLOC" 2>/dev/null || echo "Deja dans le state"
+          fi
+
+          echo "Import termine"
+
+      - name: Terraform Plan
+        working-directory: ./terraform
+        run: terraform plan -out=tfplan
+
+      - name: Terraform Apply
+        working-directory: ./terraform
+        run: terraform apply -auto-approve tfplan
+
+      - name: Recuperer IP publique
+        id: tf_output
+        working-directory: ./terraform
+        run: |
+          SERVER_IP=$(terraform output -raw elastic_ip)
+          echo "server_ip=$SERVER_IP" >> "$GITHUB_OUTPUT"
+          echo "Nouvelle VM : $SERVER_IP"
+
+      - name: Sauvegarder Terraform State
+        if: always()
+        working-directory: ./terraform
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add terraform.tfstate terraform.tfstate.backup 2>/dev/null || true
+          git stash -- terraform.tfstate terraform.tfstate.backup 2>/dev/null || true
+          git pull --rebase origin main || true
+          git stash pop 2>/dev/null || true
+          git add terraform.tfstate terraform.tfstate.backup 2>/dev/null || true
+          git diff --cached --quiet || git commit -m "chore: update terraform state [skip ci]"
+          git push || echo "Push du state echoue"
+
+  setup:
+    name: "Job 3 — Setup and Deploy"
+    runs-on: ubuntu-latest
+    needs: [check, terraform]
+    if: always() && needs.check.result == 'success' && (needs.terraform.result == 'success' || needs.terraform.result == 'skipped')
+    steps:
+      - name: Checkout du code
+        uses: actions/checkout@v4
+
+      - name: Determiner IP du serveur
+        id: get_ip
+        run: |
+          if [ "${{ needs.check.outputs.vm_exists }}" == "true" ]; then
+            echo "server_ip=${{ needs.check.outputs.server_ip }}" >> "$GITHUB_OUTPUT"
+            echo "Reutilisation VM existante : ${{ needs.check.outputs.server_ip }}"
+          else
+            echo "server_ip=${{ needs.terraform.outputs.server_ip }}" >> "$GITHUB_OUTPUT"
+            echo "Nouvelle VM : ${{ needs.terraform.outputs.server_ip }}"
+          fi
+
+      - name: Attendre que la VM soit prete SSH
+        env:
+          SERVER_IP: ${{ steps.get_ip.outputs.server_ip }}
+        run: |
+          echo "Attente SSH sur $SERVER_IP ..."
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/vockey.pem
+          chmod 600 ~/.ssh/vockey.pem
+          for i in $(seq 1 40); do
+            if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -i ~/.ssh/vockey.pem ubuntu@$SERVER_IP "echo ok" 2>/dev/null; then
+              echo "SSH pret apres $((i*10)) secondes"
+              break
+            fi
+            echo "  Tentative $i/40 — attente 10s..."
+            sleep 10
+          done
+
+      - name: Copier le script setup sur la VM
+        env:
+          SERVER_IP: ${{ steps.get_ip.outputs.server_ip }}
+        run: |
+          scp -o StrictHostKeyChecking=no -i ~/.ssh/vockey.pem \
+            scripts/setup.sh ubuntu@$SERVER_IP:/home/ubuntu/setup.sh
+
+      - name: Executer le setup sur la VM
+        env:
+          SERVER_IP: ${{ steps.get_ip.outputs.server_ip }}
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/vockey.pem \
+            ubuntu@$SERVER_IP "chmod +x /home/ubuntu/setup.sh && sudo bash /home/ubuntu/setup.sh"
+
+  run:
+    name: "Job 4 — Start and Show URLs"
+    runs-on: ubuntu-latest
+    needs: [check, terraform, setup]
+    if: always() && needs.setup.result == 'success'
+    steps:
+      - name: Determiner IP du serveur
+        id: get_ip
+        run: |
+          if [ "${{ needs.check.outputs.vm_exists }}" == "true" ]; then
+            echo "server_ip=${{ needs.check.outputs.server_ip }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "server_ip=${{ needs.terraform.outputs.server_ip }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configurer SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/vockey.pem
+          chmod 600 ~/.ssh/vockey.pem
+
+      - name: Demarrer le backend et le frontend
+        env:
+          SERVER_IP: ${{ steps.get_ip.outputs.server_ip }}
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/vockey.pem ubuntu@$SERVER_IP << 'REMOTE_SCRIPT'
+            set -e
+            echo "Demarrage des services..."
+            sudo pkill -f "manage.py runserver" 2>/dev/null || true
+            sudo pkill -f "vite" 2>/dev/null || true
+            sleep 2
+            sudo service mysql start
+            sleep 2
+            cd /home/ubuntu/medical-projet/pfe-backend
+            source /home/ubuntu/medical-projet/venv/bin/activate
+            nohup python manage.py runserver 0.0.0.0:8000 > /tmp/backend.log 2>&1 &
+            echo "Backend demarre (PID: $!)"
+            cd /home/ubuntu/medical-projet/pfe-frontend
+            nohup npx vite --host 0.0.0.0 --port 5173 > /tmp/frontend.log 2>&1 &
+            echo "Frontend demarre (PID: $!)"
+            sleep 10
+            echo "-- Verification des services --"
+            curl -s -o /dev/null -w "Backend  (port 8000) : HTTP %{http_code}\n" http://localhost:8000/ || echo "Backend  : en attente..."
+            curl -s -o /dev/null -w "Frontend (port 5173) : HTTP %{http_code}\n" http://localhost:5173/ || echo "Frontend : en attente..."
+          REMOTE_SCRIPT
+
+      - name: Afficher les URLs
+        env:
+          SERVER_IP: ${{ steps.get_ip.outputs.server_ip }}
+        run: |
+          echo ""
+          echo "============================================="
+          echo "  PROJET MEDICAL — DEPLOYE AVEC SUCCES"
+          echo "============================================="
+          echo ""
+          echo "  Frontend : http://$SERVER_IP:5173"
+          echo "  Backend  : http://$SERVER_IP:8000"
+          echo "  API      : http://$SERVER_IP:8000/api/"
+          echo "  SSH      : ssh -i vockey.pem ubuntu@$SERVER_IP"
+          echo ""
