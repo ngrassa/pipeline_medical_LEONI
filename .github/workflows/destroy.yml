@@ -45,6 +45,31 @@ jobs:
         working-directory: ./terraform
         run: terraform init
 
+      - name: Importer ressources AWS existantes
+        working-directory: ./terraform
+        run: |
+          echo "Recherche de ressources existantes sur AWS..."
+
+          SG_ID=$(aws ec2 describe-security-groups --filters "Name=group-name,Values=server_terraform-sg" --query "SecurityGroups[0].GroupId" --output text 2>/dev/null || echo "None")
+          if [ "$SG_ID" != "None" ] && [ -n "$SG_ID" ]; then
+            echo "Security Group existant : $SG_ID — import..."
+            terraform import aws_security_group.server_terraform_sg "$SG_ID" 2>/dev/null || echo "Deja dans le state"
+          fi
+
+          INSTANCE_ID=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=server_terraform" "Name=instance-state-name,Values=running,stopped" --query "Reservations[0].Instances[0].InstanceId" --output text 2>/dev/null || echo "None")
+          if [ "$INSTANCE_ID" != "None" ] && [ -n "$INSTANCE_ID" ]; then
+            echo "Instance EC2 existante : $INSTANCE_ID — import..."
+            terraform import aws_instance.server_terraform "$INSTANCE_ID" 2>/dev/null || echo "Deja dans le state"
+          fi
+
+          EIP_ALLOC=$(aws ec2 describe-addresses --filters "Name=tag:Name,Values=server_terraform-eip" --query "Addresses[0].AllocationId" --output text 2>/dev/null || echo "None")
+          if [ "$EIP_ALLOC" != "None" ] && [ -n "$EIP_ALLOC" ]; then
+            echo "Elastic IP existante : $EIP_ALLOC — import..."
+            terraform import aws_eip.server_terraform_eip "$EIP_ALLOC" 2>/dev/null || echo "Deja dans le state"
+          fi
+
+          echo "Import termine"
+
       - name: Terraform Destroy
         working-directory: ./terraform
         run: terraform destroy -auto-approve
@@ -55,9 +80,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           rm -f terraform.tfstate terraform.tfstate.backup
+          git add terraform.tfstate terraform.tfstate.backup 2>/dev/null || true
+          git add -A
+          git stash 2>/dev/null || true
+          git pull --rebase origin main || true
+          git stash pop 2>/dev/null || true
           git add -A
           git diff --cached --quiet || git commit -m "chore: clean terraform state after destroy [skip ci]"
-          git push || echo "⚠️ Push échoué"
+          git push || echo "Push du state echoue"
 
       - name: Résultat
         run: |
